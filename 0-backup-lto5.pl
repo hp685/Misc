@@ -1,6 +1,11 @@
 #!/usr/bin/perl -w
 
 
+# Automatic backup program
+# Perl Script
+
+#Author  Harsh Patel 
+#        harsh@nyu.edu
 
 #######################################
 
@@ -34,7 +39,8 @@ our $backupPath='/tesladata/isetools/backupprogs/pv_lto5/links';
 our $pastBackupsPath='$backupPath/pastbackups';
 our $bhistoryPath='/tesladata/ise/bhistory';
 our $getNextDateProg='/tesladata/isetools/getNextWeekday.pl';
-
+our $drivenum = '2';
+our $drivePath = '/dev/sg4'; 
 #############################################################
 
               #Validates user and machine
@@ -47,8 +53,6 @@ sub validateUserAndMachine{
     $current_user =~ s/\s+$//g;  #Trim trailing whitespaces
     my  $current_machine=`uname -n`;
     $current_machine =~ s/\s+$//g;
-
-
     if ($current_user ne $user)	{
 	print "You must be logged in as $user. Aborting... \n" ;
 	exit;
@@ -207,6 +211,7 @@ sub createListing{
     my $endDate = $_[1];
     my $nextDate = $startDate; #Start with the start date provided
     my @dates =(); 
+    my @paths = ();
     # Determine the yearmonth directory name
     my $yearMonth = substr $nextDate, 0, 6; #YYYYMMDD => YYYYMM
     
@@ -255,12 +260,14 @@ sub createListing{
 			print "Please correct this and re-execute the program. Aborting...\n";
 			rollBackAndExit();
 		    }
-
 		}
 		#Create a link to the data.
 		#symlink "$dirToBackup","$backupPath/lnkd_$nextDate"  or die print " Cannot create a symlink $!\n";
 		`ln -s $dirToBackup $backupPath/lnkd_$nextDate`;
+		chomp $nextDate;
+		chomp $dirToBackup;
 		push @dates, $nextDate;
+		push @paths, $dirToBackup;
 		closedir(DIR);
 	    }
 	}
@@ -271,7 +278,20 @@ sub createListing{
     }until($sumTotal >= $TAPEMAX || $nextDate eq $today || $nextDate gt $endDate );
     
     print "Total size = $sumTotal\n";
-    return @dates;
+
+    # Doesn't fill the tape, Abort. 
+    if ($sumTotal < $TAPEMAX) {
+	print " Not enough Data to fill the tape. Aborting...\n";
+	exit;
+    }
+
+#     # Prepare for next tape. Start where last left off. 
+#     if($nextDate < $endDate) 
+# 	{
+# 	    $startDate = $endDate; 
+# 	}
+     # Return references
+    return (\@dates, \@paths); 
 }
 
 ################################################################
@@ -281,14 +301,25 @@ sub createListing{
 ################################################################
 
 sub displayListing{
-
-    my @dates = @_;
-    print "List of dates:\n";
-    #Display the listing to the user.  
-    foreach my $date(@dates){
-	print "$date";
-    }   
     
+    # Get dates and paths arrays-- Perhaps, a map would've made better sense  
+    my($dateref, $pathref) = @_; # Get the references
+    my @dates = @{$dateref }; # Dereference
+    my @paths = @{$pathref};
+
+    print "List of dates:\n";
+    #Display the listing of dates to the user  
+    foreach my $date(@dates){
+	print "$date\n";
+    }   
+    my $logFileName = "$bhistoryPath/tape_$dates[0]-$dates[-1]";
+    print "logFileName : $logFileName\n";
+    #Listing of Paths
+    foreach my $path(@paths){
+	print "$path\n";
+    }
+    
+    return $logFileName;    
 }
       
 
@@ -305,5 +336,67 @@ sub displayListing{
 
 validateUserAndMachine();
 my ($startDate, $endDate) = validateStartAndEndDates();
-my @dates = createListing($startDate,$endDate);
-displayListing(@dates);
+
+my ($dateref, $pathref) = createListing($startDate,$endDate);
+my @dates = @{$dateref};
+my @paths = @{$pathref};
+#Handle the abort in createListing 
+
+my $logFileName = displayListing(\@dates, \@paths);
+
+
+# Tape Backup Process
+
+my $CHOICE ='';
+
+do{
+    print "Insert tape into the drive $drivenum\n";
+    printf "Ready to continue? [Y, <or N to abort>]:";
+    $CHOICE = <STDIN>;
+    chomp $CHOICE;
+    if ($CHOICE eq "Y" || $CHOICE eq  "y" || $CHOICE eq "1"){
+	$CHOICE = "y";
+    }
+    elsif($CHOICE eq "N" || $CHOICE eq "n" || $CHOICE eq "0"){
+	print " Aborting on user request... \n";
+	exit;
+    }
+    else{
+	print "Could not understand your choice. Retrying...\n";
+    }
+
+}until($CHOICE eq "y");
+
+
+# Mount and rewind tape 
+print "Rewinding tape...";
+`sudo mt -f $drivePath rewind`; 
+print "Rewinding done\n\n";
+
+
+print "Backing up: This may take several hours...\n";
+
+# For every entry in the backup directory, backup
+## Compress files
+chomp $backupPath;
+my $i = 1;
+opendir(DIR,$backupPath);
+
+while(my $link =  readdir(DIR)){
+    next if $link =~ /^\./;
+    print "Link : $link\n";
+    `sudo tar -cvhf $drivePath "$backupPath/$link" 2>&1 | tee -a $logFileName`;
+    print "$paths[$i]\n";
+    `sudo touch "$paths[$i]/backedup"`;
+    `sudo  chown ise:ise "$paths[$i]/backedup"`;
+    $i += 1;
+} 
+closedir(DIR);
+#Log the results
+open FILE, ">>", $logFileName or die print"Cannot open log $!";
+print FILE "Backup finished normally";
+print FILE "Log has been created.";
+print FILE "Remove the tape from drive $drivenum and label...";
+print FILE "Done";
+close FILE;
+
